@@ -1,0 +1,191 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum Visibility {
+  PUBLIC
+  UNLISTED
+  PRIVATE
+}
+
+enum NotificationType {
+  MENTION
+  COMMENT
+  STAR
+  FORK
+}
+
+model User {
+  id              String           @id @default(cuid())
+  email           String           @unique
+  username        String           @unique
+  password        String
+  displayName     String?
+  bio             String?
+  avatarUrl       String?
+  role            Role             @default(USER)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  gists           Gist[]
+  stars           Star[]
+  comments        Comment[]
+  notifications   Notification[]   @relation("NotificationUser")
+  mentionedIn     Notification[]   @relation("MentionedUser")
+  commentMentions CommentMention[]
+
+  @@index([email])
+  @@index([username])
+}
+
+model Tag {
+  id    String @id @default(cuid())
+  name  String @unique
+  gists Gist[] @relation("GistTags")
+
+  @@index([name])
+}
+
+model Gist {
+  id          String     @id @default(cuid())
+  title       String
+  description String?
+  visibility  Visibility @default(PUBLIC)
+  starsCount  Int        @default(0)
+  forksCount  Int        @default(0)
+
+  authorId String
+  author   User   @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  parentId String?
+  parent   Gist?  @relation("GistForks", fields: [parentId], references: [id])
+  forks    Gist[] @relation("GistForks")
+
+  files     GistFile[]
+  revisions Revision[]
+  comments  Comment[]
+  tags      Tag[]  @relation("GistTags")
+  stars     Star[]
+
+  searchVector Unsupported("tsvector")?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([authorId])
+  @@index([visibility])
+  @@index([createdAt])
+  @@index([updatedAt])
+  @@index([parentId])
+}
+
+model GistFile {
+  id       String @id @default(cuid())
+  filename String
+  language String
+  content  String
+  order    Int    @default(0)
+
+  gistId String
+  gist   Gist   @relation(fields: [gistId], references: [id], onDelete: Cascade)
+
+  revisionId String?
+  revision   Revision? @relation(fields: [revisionId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@index([gistId])
+  @@index([revisionId])
+}
+
+model Revision {
+  id        String     @id @default(cuid())
+  message   String?
+  gistId    String
+  gist      Gist       @relation(fields: [gistId], references: [id], onDelete: Cascade)
+  files     GistFile[]
+  createdAt DateTime   @default(now())
+
+  @@index([gistId])
+  @@index([createdAt])
+}
+
+model Comment {
+  id       String @id @default(cuid())
+  content  String
+  gistId   String
+  gist     Gist   @relation(fields: [gistId], references: [id], onDelete: Cascade)
+  authorId String
+  author   User   @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  parentId String?
+  parent   Comment?  @relation("CommentReplies", fields: [parentId], references: [id])
+  replies  Comment[] @relation("CommentReplies")
+
+  mentions CommentMention[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([gistId])
+  @@index([authorId])
+  @@index([parentId])
+}
+
+model CommentMention {
+  id        String  @id @default(cuid())
+  commentId String
+  comment   Comment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([commentId, userId])
+  @@index([commentId])
+  @@index([userId])
+}
+
+model Star {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  gistId    String
+  gist      Gist     @relation(fields: [gistId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, gistId])
+  @@index([userId])
+  @@index([gistId])
+}
+
+model Notification {
+  id   String           @id @default(cuid())
+  type NotificationType
+  read Boolean          @default(false)
+
+  userId String
+  user   User   @relation("NotificationUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  mentionedId String?
+  mentioned   User?  @relation("MentionedUser", fields: [mentionedId], references: [id])
+
+  gistId    String?
+  commentId String?
+  actorId   String?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([read])
+  @@index([createdAt])
+}

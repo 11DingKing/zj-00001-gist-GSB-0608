@@ -1,0 +1,80 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: zj-00001-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dev
+      POSTGRES_PASSWORD: dev123456
+      POSTGRES_DB: db_zj_00001
+    ports:
+      - '15001:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U dev -d db_zj_00001']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: zj-00001-redis
+    restart: unless-stopped
+    command: ['redis-server', '--requirepass', 'redis123456']
+    ports:
+      - '14001:6379'
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', '--no-auth-warning', '-a', 'redis123456', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: zj-00001-backend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://dev:dev123456@postgres:5432/db_zj_00001
+      REDIS_URL: redis://default:redis123456@redis:6379
+      JWT_ACCESS_SECRET: access_secret_key_change_in_production
+      JWT_REFRESH_SECRET: refresh_secret_key_change_in_production
+      JWT_ACCESS_EXPIRES_IN: 15m
+      JWT_REFRESH_EXPIRES_IN: 7d
+    ports:
+      - '13001:3000'
+    volumes:
+      - ./backend/src:/app/src
+      - ./backend/prisma:/app/prisma
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: sh -c "npx prisma db push && npx prisma db seed && npm run start:dev"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: zj-00001-frontend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: development
+      VITE_API_BASE_URL: http://localhost:13001
+    ports:
+      - '16001:5173'
+    volumes:
+      - ./frontend/src:/app/src
+    depends_on:
+      - backend
+    command: npm run dev
+
+volumes:
+  postgres_data:
+  redis_data:
