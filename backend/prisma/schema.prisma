@@ -88,6 +88,7 @@ model Gist {
   @@index([createdAt])
   @@index([updatedAt])
   @@index([parentId])
+  @@index([searchVector], type: Gin)
 }
 
 model GistFile {
