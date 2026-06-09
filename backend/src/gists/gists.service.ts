@@ -1,8 +1,4 @@
-import {
-  ForbiddenException,
-  Injectable,
-  NotFoundException,
-} from '@nestjs/common';
+import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, Visibility } from '@prisma/client';
 import * as Diff from 'diff';
 import { PrismaService } from '../prisma/prisma.service';
@@ -13,16 +9,11 @@ import { CreateGistDto, UpdateGistDto, CursorPaginationDto, SearchGistsDto } fro
 export class GistsService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly redis: RedisService,
+    private readonly redis: RedisService
   ) {}
 
   private readonly POPULAR_GISTS_CACHE_KEY = 'popular_gists';
   private readonly CACHE_TTL = 5 * 60;
-
-  private buildSearchVector(title: string, description: string, files: { filename: string; content: string }[]): string {
-    const fileContent = files.map(f => `${f.filename} ${f.content}`).join(' ');
-    return `${title} ${description || ''} ${fileContent}`;
-  }
 
   private async updateGistStarsCount(gistId: string) {
     const count = await this.prisma.star.count({
@@ -37,7 +28,7 @@ export class GistsService {
   async listPublicGists(
     pagination: CursorPaginationDto,
     language?: string,
-    currentUserId?: string,
+    currentUserId?: string
   ) {
     const pageSize = pagination.limit || 20;
     const where: Prisma.GistWhereInput = {
@@ -96,17 +87,79 @@ export class GistsService {
 
   async searchGists(searchDto: SearchGistsDto, currentUserId?: string) {
     const pageSize = searchDto.limit || 20;
+    const query = searchDto.query?.trim();
+
+    if (!query) {
+      return { data: [], nextCursor: null, hasMore: false };
+    }
+
+    let lastRank: number | null = null;
+    let lastId: string | null = null;
+    if (searchDto.cursor) {
+      const colonIdx = searchDto.cursor.indexOf(':');
+      if (colonIdx > 0) {
+        const rankPart = searchDto.cursor.substring(0, colonIdx);
+        const idPart = searchDto.cursor.substring(colonIdx + 1);
+        const parsed = parseFloat(rankPart);
+        if (!isNaN(parsed) && idPart) {
+          lastRank = parsed;
+          lastId = idPart;
+        }
+      }
+    }
+
+    const visibilityClause = currentUserId
+      ? Prisma.sql`(g."visibility" = 'PUBLIC'::"Visibility" OR (g."visibility" = 'UNLISTED'::"Visibility" AND g."authorId" = ${currentUserId}))`
+      : Prisma.sql`g."visibility" = 'PUBLIC'::"Visibility"`;
+
+    let searchResults: { id: string; rank: number }[];
+
+    if (lastRank !== null && lastId !== null) {
+      searchResults = await this.prisma.$queryRaw<{ id: string; rank: number }[]>`
+        SELECT g.id, ts_rank(g."searchVector", plainto_tsquery('english', ${query})) AS rank
+        FROM "Gist" g
+        WHERE g."searchVector" @@ plainto_tsquery('english', ${query})
+        AND ${visibilityClause}
+        AND (
+          ts_rank(g."searchVector", plainto_tsquery('english', ${query})) < ${lastRank}::double precision
+          OR (ts_rank(g."searchVector", plainto_tsquery('english', ${query})) = ${lastRank}::double precision AND g.id < ${lastId})
+        )
+        ORDER BY rank DESC, g.id DESC
+        LIMIT ${pageSize + 1}
+      `;
+    } else {
+      searchResults = await this.prisma.$queryRaw<{ id: string; rank: number }[]>`
+        SELECT g.id, ts_rank(g."searchVector", plainto_tsquery('english', ${query})) AS rank
+        FROM "Gist" g
+        WHERE g."searchVector" @@ plainto_tsquery('english', ${query})
+        AND ${visibilityClause}
+        ORDER BY rank DESC, g.id DESC
+        LIMIT ${pageSize + 1}
+      `;
+    }
+
+    let nextCursor: string | null = null;
+    let hasMore = false;
+
+    if (searchResults.length > pageSize) {
+      hasMore = true;
+      searchResults.pop();
+      const lastItem = searchResults[searchResults.length - 1];
+      nextCursor = `${lastItem.rank}:${lastItem.id}`;
+    }
+
+    if (searchResults.length === 0) {
+      return { data: [], nextCursor: null, hasMore: false };
+    }
+
+    const gistIds = searchResults.map((r) => r.id);
+    const rankMap = new Map<string, number>();
+    for (const r of searchResults) {
+      rankMap.set(r.id, r.rank);
+    }
 
     const gists = await this.prisma.gist.findMany({
-      where: {
-        AND: [
-          { visibility: Visibility.PUBLIC },
-        ],
-      } as any,
-      orderBy: [{ updatedAt: 'desc' }],
-      take: pageSize + 1,
-      cursor: searchDto.cursor ? { id: searchDto.cursor } : undefined,
-      skip: searchDto.cursor ? 1 : 0,
+      where: { id: { in: gistIds } },
       include: {
         author: {
           select: {
@@ -124,16 +177,17 @@ export class GistsService {
       },
     });
 
-    let nextCursor: string | null = null;
-    if (gists.length > pageSize) {
-      const nextItem = gists.pop();
-      nextCursor = nextItem!.id;
-    }
+    gists.sort((a, b) => {
+      const rankA = rankMap.get(a.id) ?? 0;
+      const rankB = rankMap.get(b.id) ?? 0;
+      if (rankB !== rankA) return rankB - rankA;
+      return b.id.localeCompare(a.id);
+    });
 
     return {
       data: gists,
       nextCursor,
-      hasMore: !!nextCursor,
+      hasMore,
     };
   }
 
@@ -155,7 +209,7 @@ export class GistsService {
       },
     });
 
-    const result = tags.map(tag => ({
+    const result = tags.map((tag) => ({
       name: tag.name,
       count: tag._count.gists,
     }));
@@ -163,7 +217,7 @@ export class GistsService {
     await this.redis.setWithExpiry(
       this.POPULAR_GISTS_CACHE_KEY,
       JSON.stringify(result),
-      this.CACHE_TTL,
+      this.CACHE_TTL
     );
 
     return result;
@@ -180,7 +234,7 @@ export class GistsService {
           visibility: dto.visibility || Visibility.PUBLIC,
           authorId: userId,
           tags: {
-            connect: tags.map(tag => ({ id: tag.id })),
+            connect: tags.map((tag) => ({ id: tag.id })),
           },
         },
       });
@@ -283,10 +337,7 @@ export class GistsService {
       throw new NotFoundException('Gist not found');
     }
 
-    if (
-      gist.visibility === Visibility.PRIVATE &&
-      gist.author.id !== currentUserId
-    ) {
+    if (gist.visibility === Visibility.PRIVATE && gist.author.id !== currentUserId) {
       throw new ForbiddenException('Access denied');
     }
 
@@ -332,7 +383,7 @@ export class GistsService {
           visibility: dto.visibility,
           tags: tags
             ? {
-                set: tags.map(tag => ({ id: tag.id })),
+                set: tags.map((tag) => ({ id: tag.id })),
               }
             : undefined,
         },
@@ -429,10 +480,7 @@ export class GistsService {
       throw new NotFoundException('Gist not found');
     }
 
-    if (
-      originalGist.visibility === Visibility.PRIVATE &&
-      originalGist.authorId !== userId
-    ) {
+    if (originalGist.visibility === Visibility.PRIVATE && originalGist.authorId !== userId) {
       throw new ForbiddenException('Access denied');
     }
 
@@ -449,7 +497,7 @@ export class GistsService {
           authorId: userId,
           parentId: originalGist.id,
           tags: {
-            connect: originalGist.tags.map(tag => ({ id: tag.id })),
+            connect: originalGist.tags.map((tag) => ({ id: tag.id })),
           },
         },
       });
@@ -530,10 +578,7 @@ export class GistsService {
       throw new NotFoundException('Gist not found');
     }
 
-    if (
-      gist.visibility === Visibility.PRIVATE &&
-      gist.authorId !== userId
-    ) {
+    if (gist.visibility === Visibility.PRIVATE && gist.authorId !== userId) {
       throw new ForbiddenException('Access denied');
     }
 
@@ -623,10 +668,7 @@ export class GistsService {
       throw new NotFoundException('Gist not found');
     }
 
-    if (
-      gist.visibility === Visibility.PRIVATE &&
-      gist.authorId !== currentUserId
-    ) {
+    if (gist.visibility === Visibility.PRIVATE && gist.authorId !== currentUserId) {
       throw new ForbiddenException('Access denied');
     }
 
@@ -650,7 +692,7 @@ export class GistsService {
     gistId: string,
     fromRevisionId: string,
     toRevisionId: string,
-    currentUserId?: string,
+    currentUserId?: string
   ) {
     const gist = await this.prisma.gist.findUnique({
       where: { id: gistId },
@@ -660,10 +702,7 @@ export class GistsService {
       throw new NotFoundException('Gist not found');
     }
 
-    if (
-      gist.visibility === Visibility.PRIVATE &&
-      gist.authorId !== currentUserId
-    ) {
+    if (gist.visibility === Visibility.PRIVATE && gist.authorId !== currentUserId) {
       throw new ForbiddenException('Access denied');
     }
 
@@ -689,26 +728,16 @@ export class GistsService {
 
     const fileDiffs: any[] = [];
 
-    const fromFilesMap = new Map(
-      fromRevision.files.map(f => [f.filename, f]),
-    );
-    const toFilesMap = new Map(
-      toRevision.files.map(f => [f.filename, f]),
-    );
+    const fromFilesMap = new Map(fromRevision.files.map((f) => [f.filename, f]));
+    const toFilesMap = new Map(toRevision.files.map((f) => [f.filename, f]));
 
-    const allFilenames = new Set([
-      ...fromFilesMap.keys(),
-      ...toFilesMap.keys(),
-    ]);
+    const allFilenames = new Set([...fromFilesMap.keys(), ...toFilesMap.keys()]);
 
     for (const filename of allFilenames) {
       const fromFile = fromFilesMap.get(filename);
       const toFile = toFilesMap.get(filename);
 
-      const diff = Diff.diffLines(
-        fromFile?.content || '',
-        toFile?.content || '',
-      );
+      const diff = Diff.diffLines(fromFile?.content || '', toFile?.content || '');
 
       fileDiffs.push({
         filename,
@@ -728,16 +757,16 @@ export class GistsService {
   }
 
   private async upsertTags(tagNames: string[]) {
-    const uniqueTags = [...new Set(tagNames.map(t => t.toLowerCase().trim()))].filter(Boolean);
+    const uniqueTags = [...new Set(tagNames.map((t) => t.toLowerCase().trim()))].filter(Boolean);
 
     const tags = await Promise.all(
-      uniqueTags.map(name =>
+      uniqueTags.map((name) =>
         this.prisma.tag.upsert({
           where: { name },
           update: {},
           create: { name },
-        }),
-      ),
+        })
+      )
     );
 
     return tags;

@@ -1,13 +1,14 @@
-import axios from 'axios';
-import { useAuthStore } from '@/stores/auth';
+import axios from "axios";
+import { useAuthStore } from "@/stores/auth";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:13001';
+const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL || "http://localhost:13001";
 
 const api = axios.create({
-  baseURL: `${API_BASE_URL}/api`,
+  baseURL: `${API_BASE_URL}/api/v1`,
   withCredentials: true,
   headers: {
-    'Content-Type': 'application/json',
+    "Content-Type": "application/json",
   },
 });
 
@@ -29,9 +30,9 @@ api.interceptors.response.use(
 
       try {
         const response = await axios.post(
-          `${API_BASE_URL}/api/auth/refresh`,
+          `${API_BASE_URL}/api/v1/auth/refresh`,
           {},
-          { withCredentials: true }
+          { withCredentials: true },
         );
 
         const { accessToken, user } = response.data;
@@ -49,7 +50,7 @@ api.interceptors.response.use(
     }
 
     throw error;
-  }
+  },
 );
 
 export default api;

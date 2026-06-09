@@ -1,20 +1,11 @@
-import {
-  Controller,
-  Get,
-  Post,
-  Param,
-  UseGuards,
-  Query,
-} from '@nestjs/common';
+import { Controller, Get, Post, Param, Query } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { NotificationsService } from './notifications.service';
-import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { GetCurrentUserId } from '../auth/decorators/get-current-user-id.decorator';
 import { CursorPaginationDto } from '../gists/dto';
 
 @ApiTags('Notifications')
 @Controller('notifications')
-@UseGuards(JwtAuthGuard)
 export class NotificationsController {
   constructor(private readonly notificationsService: NotificationsService) {}
 
@@ -22,7 +13,7 @@ export class NotificationsController {
   async listNotifications(
     @GetCurrentUserId() userId: string,
     @Query() pagination: CursorPaginationDto,
-    @Query('read') read?: string,
+    @Query('read') read?: string
   ) {
     const isRead = read === 'true' ? true : read === 'false' ? false : undefined;
     return this.notificationsService.listNotifications(userId, pagination, isRead);
@@ -34,10 +25,7 @@ export class NotificationsController {
   }
 
   @Post(':id/read')
-  async markAsRead(
-    @Param('id') id: string,
-    @GetCurrentUserId() userId: string,
-  ) {
+  async markAsRead(@Param('id') id: string, @GetCurrentUserId() userId: string) {
     return this.notificationsService.markAsRead(id, userId);
   }
 
