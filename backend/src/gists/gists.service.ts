@@ -1,8 +1,4 @@
-import {
-  ForbiddenException,
-  Injectable,
-  NotFoundException,
-} from '@nestjs/common';
+import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, Visibility } from '@prisma/client';
 import * as Diff from 'diff';
 import { PrismaService } from '../prisma/prisma.service';
@@ -13,14 +9,18 @@ import { CreateGistDto, UpdateGistDto, CursorPaginationDto, SearchGistsDto } fro
 export class GistsService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly redis: RedisService,
+    private readonly redis: RedisService
   ) {}
 
   private readonly POPULAR_GISTS_CACHE_KEY = 'popular_gists';
   private readonly CACHE_TTL = 5 * 60;
 
-  private buildSearchVector(title: string, description: string, files: { filename: string; content: string }[]): string {
-    const fileContent = files.map(f => `${f.filename} ${f.content}`).join(' ');
+  private buildSearchVector(
+    title: string,
+    description: string,
+    files: { filename: string; content: string }[]
+  ): string {
+    const fileContent = files.map((f) => `${f.filename} ${f.content}`).join(' ');
     return `${title} ${description || ''} ${fileContent}`;
   }
 
@@ -37,7 +37,7 @@ export class GistsService {
   async listPublicGists(
     pagination: CursorPaginationDto,
     language?: string,
-    currentUserId?: string,
+    currentUserId?: string
   ) {
     const pageSize = pagination.limit || 20;
     const where: Prisma.GistWhereInput = {
@@ -96,17 +96,79 @@ export class GistsService {
 
   async searchGists(searchDto: SearchGistsDto, currentUserId?: string) {
     const pageSize = searchDto.limit || 20;
+    const rawQuery = (searchDto.query || '').trim();
 
+    if (!rawQuery) {
+      return { data: [], nextCursor: null, hasMore: false };
+    }
+
+    // Decode opaque cursor: base64("<rank>|<id>")
+    let cursorRank: number | null = null;
+    let cursorId: string | null = null;
+    if (searchDto.cursor) {
+      try {
+        const decoded = Buffer.from(searchDto.cursor, 'base64').toString('utf8');
+        const sep = decoded.indexOf('|');
+        if (sep > 0) {
+          const r = Number(decoded.slice(0, sep));
+          const i = decoded.slice(sep + 1);
+          if (Number.isFinite(r) && i) {
+            cursorRank = r;
+            cursorId = i;
+          }
+        }
+      } catch {
+        // ignore malformed cursor — fall back to first page
+      }
+    }
+
+    // Visibility rules enforced at the DB layer:
+    //   PRIVATE: never returned
+    //   UNLISTED: only visible to its own author
+    //   PUBLIC: visible to everyone
+    const userId = currentUserId ?? null;
+    const limitPlusOne = pageSize + 1;
+
+    // Rank with ts_rank_cd. Title=A, description=B, file content=C — already
+    // baked into searchVector by the trigger via setweight(...).
+    const ranked = await this.prisma.$queryRaw<Array<{ id: string; rank: number }>>(Prisma.sql`
+      WITH q AS (
+        SELECT plainto_tsquery('simple', ${rawQuery}) AS query
+      )
+      SELECT g.id, ts_rank_cd(g."searchVector", q.query) AS rank
+      FROM "Gist" g, q
+      WHERE g."searchVector" @@ q.query
+        AND (
+          g.visibility = 'PUBLIC'
+          OR (g.visibility = 'UNLISTED' AND g."authorId" = ${userId})
+        )
+        AND (
+          ${cursorRank}::float8 IS NULL
+          OR ts_rank_cd(g."searchVector", q.query) < ${cursorRank}::float8
+          OR (
+            ts_rank_cd(g."searchVector", q.query) = ${cursorRank}::float8
+            AND g.id < ${cursorId}
+          )
+        )
+      ORDER BY rank DESC, g.id DESC
+      LIMIT ${limitPlusOne}
+    `);
+
+    let nextCursor: string | null = null;
+    let pageRows = ranked;
+    if (ranked.length > pageSize) {
+      pageRows = ranked.slice(0, pageSize);
+      const last = pageRows[pageRows.length - 1];
+      nextCursor = Buffer.from(`${last.rank}|${last.id}`, 'utf8').toString('base64');
+    }
+
+    if (pageRows.length === 0) {
+      return { data: [], nextCursor: null, hasMore: false };
+    }
+
+    const ids = pageRows.map((r) => r.id);
     const gists = await this.prisma.gist.findMany({
-      where: {
-        AND: [
-          { visibility: Visibility.PUBLIC },
-        ],
-      } as any,
-      orderBy: [{ updatedAt: 'desc' }],
-      take: pageSize + 1,
-      cursor: searchDto.cursor ? { id: searchDto.cursor } : undefined,
-      skip: searchDto.cursor ? 1 : 0,
+      where: { id: { in: ids } },
       include: {
         author: {
           select: {
@@ -119,16 +181,15 @@ export class GistsService {
         files: {
           orderBy: { order: 'asc' },
           take: 1,
+          where: { revisionId: null },
         },
         tags: true,
       },
     });
 
-    let nextCursor: string | null = null;
-    if (gists.length > pageSize) {
-      const nextItem = gists.pop();
-      nextCursor = nextItem!.id;
-    }
+    // Preserve the relevance order produced by the ranked query.
+    const orderMap = new Map(ids.map((id, idx) => [id, idx]));
+    gists.sort((a, b) => orderMap.get(a.id)! - orderMap.get(b.id)!);
 
     return {
       data: gists,
@@ -155,7 +216,7 @@ export class GistsService {
       },
     });
 
-    const result = tags.map(tag => ({
+    const result = tags.map((tag) => ({
       name: tag.name,
       count: tag._count.gists,
     }));
@@ -163,7 +224,7 @@ export class GistsService {
     await this.redis.setWithExpiry(
       this.POPULAR_GISTS_CACHE_KEY,
       JSON.stringify(result),
-      this.CACHE_TTL,
+      this.CACHE_TTL
     );
 
     return result;
@@ -180,7 +241,7 @@ export class GistsService {
           visibility: dto.visibility || Visibility.PUBLIC,
           authorId: userId,
           tags: {
-            connect: tags.map(tag => ({ id: tag.id })),
+            connect: tags.map((tag) => ({ id: tag.id })),
           },
         },
       });
@@ -283,10 +344,7 @@ export class GistsService {
       throw new NotFoundException('Gist not found');
     }
 
-    if (
-      gist.visibility === Visibility.PRIVATE &&
-      gist.author.id !== currentUserId
-    ) {
+    if (gist.visibility === Visibility.PRIVATE && gist.author.id !== currentUserId) {
       throw new ForbiddenException('Access denied');
     }
 
@@ -332,7 +390,7 @@ export class GistsService {
           visibility: dto.visibility,
           tags: tags
             ? {
-                set: tags.map(tag => ({ id: tag.id })),
+                set: tags.map((tag) => ({ id: tag.id })),
               }
             : undefined,
         },
@@ -429,10 +487,7 @@ export class GistsService {
       throw new NotFoundException('Gist not found');
     }
 
-    if (
-      originalGist.visibility === Visibility.PRIVATE &&
-      originalGist.authorId !== userId
-    ) {
+    if (originalGist.visibility === Visibility.PRIVATE && originalGist.authorId !== userId) {
       throw new ForbiddenException('Access denied');
     }
 
@@ -449,7 +504,7 @@ export class GistsService {
           authorId: userId,
           parentId: originalGist.id,
           tags: {
-            connect: originalGist.tags.map(tag => ({ id: tag.id })),
+            connect: originalGist.tags.map((tag) => ({ id: tag.id })),
           },
         },
       });
@@ -530,10 +585,7 @@ export class GistsService {
       throw new NotFoundException('Gist not found');
     }
 
-    if (
-      gist.visibility === Visibility.PRIVATE &&
-      gist.authorId !== userId
-    ) {
+    if (gist.visibility === Visibility.PRIVATE && gist.authorId !== userId) {
       throw new ForbiddenException('Access denied');
     }
 
@@ -623,10 +675,7 @@ export class GistsService {
       throw new NotFoundException('Gist not found');
     }
 
-    if (
-      gist.visibility === Visibility.PRIVATE &&
-      gist.authorId !== currentUserId
-    ) {
+    if (gist.visibility === Visibility.PRIVATE && gist.authorId !== currentUserId) {
       throw new ForbiddenException('Access denied');
     }
 
@@ -650,7 +699,7 @@ export class GistsService {
     gistId: string,
     fromRevisionId: string,
     toRevisionId: string,
-    currentUserId?: string,
+    currentUserId?: string
   ) {
     const gist = await this.prisma.gist.findUnique({
       where: { id: gistId },
@@ -660,10 +709,7 @@ export class GistsService {
       throw new NotFoundException('Gist not found');
     }
 
-    if (
-      gist.visibility === Visibility.PRIVATE &&
-      gist.authorId !== currentUserId
-    ) {
+    if (gist.visibility === Visibility.PRIVATE && gist.authorId !== currentUserId) {
       throw new ForbiddenException('Access denied');
     }
 
@@ -689,26 +735,16 @@ export class GistsService {
 
     const fileDiffs: any[] = [];
 
-    const fromFilesMap = new Map(
-      fromRevision.files.map(f => [f.filename, f]),
-    );
-    const toFilesMap = new Map(
-      toRevision.files.map(f => [f.filename, f]),
-    );
+    const fromFilesMap = new Map(fromRevision.files.map((f) => [f.filename, f]));
+    const toFilesMap = new Map(toRevision.files.map((f) => [f.filename, f]));
 
-    const allFilenames = new Set([
-      ...fromFilesMap.keys(),
-      ...toFilesMap.keys(),
-    ]);
+    const allFilenames = new Set([...fromFilesMap.keys(), ...toFilesMap.keys()]);
 
     for (const filename of allFilenames) {
       const fromFile = fromFilesMap.get(filename);
       const toFile = toFilesMap.get(filename);
 
-      const diff = Diff.diffLines(
-        fromFile?.content || '',
-        toFile?.content || '',
-      );
+      const diff = Diff.diffLines(fromFile?.content || '', toFile?.content || '');
 
       fileDiffs.push({
         filename,
@@ -728,16 +764,16 @@ export class GistsService {
   }
 
   private async upsertTags(tagNames: string[]) {
-    const uniqueTags = [...new Set(tagNames.map(t => t.toLowerCase().trim()))].filter(Boolean);
+    const uniqueTags = [...new Set(tagNames.map((t) => t.toLowerCase().trim()))].filter(Boolean);
 
     const tags = await Promise.all(
-      uniqueTags.map(name =>
+      uniqueTags.map((name) =>
         this.prisma.tag.upsert({
           where: { name },
           update: {},
           create: { name },
-        }),
-      ),
+        })
+      )
     );
 
     return tags;
