@@ -1,17 +1,6 @@
-import {
-  Body,
-  Controller,
-  Delete,
-  Get,
-  Param,
-  Post,
-  Put,
-  Query,
-  UseGuards,
-} from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Put, Query } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { GistsService } from './gists.service';
-import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { GetCurrentUserId } from '../auth/decorators/get-current-user-id.decorator';
 import { Public } from '../auth/decorators/public.decorator';
 import { CreateGistDto, UpdateGistDto, CursorPaginationDto, SearchGistsDto } from './dto';
@@ -26,7 +15,7 @@ export class GistsController {
   async listGists(
     @Query() pagination: CursorPaginationDto,
     @Query('language') language?: string,
-    @GetCurrentUserId() currentUserId?: string,
+    @GetCurrentUserId() currentUserId?: string
   ) {
     return this.gistsService.listPublicGists(pagination, language, currentUserId);
   }
@@ -35,7 +24,7 @@ export class GistsController {
   @Get('search')
   async searchGists(
     @Query() searchDto: SearchGistsDto,
-    @GetCurrentUserId() currentUserId?: string,
+    @GetCurrentUserId() currentUserId?: string
   ) {
     return this.gistsService.searchGists(searchDto, currentUserId);
   }
@@ -46,67 +35,43 @@ export class GistsController {
     return this.gistsService.getPopularTags();
   }
 
-  @UseGuards(JwtAuthGuard)
   @Post()
-  async createGist(
-    @GetCurrentUserId() userId: string,
-    @Body() dto: CreateGistDto,
-  ) {
+  async createGist(@GetCurrentUserId() userId: string, @Body() dto: CreateGistDto) {
     return this.gistsService.createGist(userId, dto);
   }
 
   @Public()
   @Get(':id')
-  async getGist(
-    @Param('id') id: string,
-    @GetCurrentUserId() currentUserId?: string,
-  ) {
+  async getGist(@Param('id') id: string, @GetCurrentUserId() currentUserId?: string) {
     return this.gistsService.getGist(id, currentUserId);
   }
 
-  @UseGuards(JwtAuthGuard)
   @Put(':id')
   async updateGist(
     @Param('id') id: string,
     @GetCurrentUserId() userId: string,
-    @Body() dto: UpdateGistDto,
+    @Body() dto: UpdateGistDto
   ) {
     return this.gistsService.updateGist(id, userId, dto);
   }
 
-  @UseGuards(JwtAuthGuard)
   @Delete(':id')
-  async deleteGist(
-    @Param('id') id: string,
-    @GetCurrentUserId() userId: string,
-  ) {
+  async deleteGist(@Param('id') id: string, @GetCurrentUserId() userId: string) {
     return this.gistsService.deleteGist(id, userId);
   }
 
-  @UseGuards(JwtAuthGuard)
   @Post(':id/fork')
-  async forkGist(
-    @Param('id') id: string,
-    @GetCurrentUserId() userId: string,
-  ) {
+  async forkGist(@Param('id') id: string, @GetCurrentUserId() userId: string) {
     return this.gistsService.forkGist(id, userId);
   }
 
-  @UseGuards(JwtAuthGuard)
   @Post(':id/star')
-  async starGist(
-    @Param('id') id: string,
-    @GetCurrentUserId() userId: string,
-  ) {
+  async starGist(@Param('id') id: string, @GetCurrentUserId() userId: string) {
     return this.gistsService.starGist(id, userId);
   }
 
-  @UseGuards(JwtAuthGuard)
   @Delete(':id/star')
-  async unstarGist(
-    @Param('id') id: string,
-    @GetCurrentUserId() userId: string,
-  ) {
+  async unstarGist(@Param('id') id: string, @GetCurrentUserId() userId: string) {
     return this.gistsService.unstarGist(id, userId);
   }
 
@@ -121,7 +86,7 @@ export class GistsController {
   async getRevision(
     @Param('id') id: string,
     @Param('revisionId') revisionId: string,
-    @GetCurrentUserId() currentUserId?: string,
+    @GetCurrentUserId() currentUserId?: string
   ) {
     return this.gistsService.getRevision(id, revisionId, currentUserId);
   }
@@ -132,7 +97,7 @@ export class GistsController {
     @Param('id') id: string,
     @Query('from') fromRevisionId: string,
     @Query('to') toRevisionId: string,
-    @GetCurrentUserId() currentUserId?: string,
+    @GetCurrentUserId() currentUserId?: string
   ) {
     return this.gistsService.getDiff(id, fromRevisionId, toRevisionId, currentUserId);
   }
