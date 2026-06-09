@@ -96,45 +96,125 @@ export class GistsService {
 
   async searchGists(searchDto: SearchGistsDto, currentUserId?: string) {
     const pageSize = searchDto.limit || 20;
+    const query = searchDto.query.trim();
 
-    const gists = await this.prisma.gist.findMany({
-      where: {
-        AND: [
-          { visibility: Visibility.PUBLIC },
-        ],
-      } as any,
-      orderBy: [{ updatedAt: 'desc' }],
-      take: pageSize + 1,
-      cursor: searchDto.cursor ? { id: searchDto.cursor } : undefined,
-      skip: searchDto.cursor ? 1 : 0,
-      include: {
-        author: {
-          select: {
-            id: true,
-            username: true,
-            displayName: true,
-            avatarUrl: true,
+    if (!query) {
+      return {
+        data: [],
+        nextCursor: null,
+        hasMore: false,
+      };
+    }
+
+    const cursorRank = searchDto.cursor
+      ? await this.getGistRank(searchDto.cursor, query)
+      : null;
+
+    const visibilityConditions: string[] = [];
+    const params: any[] = [query];
+    let paramIndex = 1;
+
+    if (currentUserId) {
+      paramIndex++;
+      params.push(currentUserId);
+      visibilityConditions.push(`
+        ("visibility" = 'PUBLIC'::"Visibility") OR
+        ("visibility" = 'UNLISTED'::"Visibility" AND "authorId" = $${paramIndex})
+      `);
+    } else {
+      visibilityConditions.push(`"visibility" = 'PUBLIC'::"Visibility"`);
+    }
+
+    const whereConditions = `
+      "searchVector" @@ plainto_tsquery('english', $1)
+      AND (${visibilityConditions.join(' OR ')})
+    `;
+
+    let cursorCondition = '';
+    if (cursorRank !== null && searchDto.cursor) {
+      paramIndex++;
+      params.push(cursorRank);
+      paramIndex++;
+      params.push(searchDto.cursor);
+      cursorCondition = `
+        AND (
+          ts_rank("searchVector", plainto_tsquery('english', $1)) < $${paramIndex - 1}
+          OR (
+            ts_rank("searchVector", plainto_tsquery('english', $1)) = $${paramIndex - 1}
+            AND "id" < $${paramIndex}
+          )
+        )
+      `;
+    }
+
+    const sqlQuery = `
+      SELECT 
+        g.*,
+        ts_rank(g."searchVector", plainto_tsquery('english', $1)) as rank
+      FROM "Gist" g
+      WHERE ${whereConditions} ${cursorCondition}
+      ORDER BY rank DESC, "id" DESC
+      LIMIT $${paramIndex + 1}
+    `;
+
+    params.push(pageSize + 1);
+
+    const results = await this.prisma.$queryRawUnsafe<any>(sqlQuery, ...params);
+
+    const gistIds = results.slice(0, pageSize).map((r: any) => r.id);
+
+    const gists = gistIds.length > 0
+      ? await this.prisma.gist.findMany({
+          where: { id: { in: gistIds } },
+          include: {
+            author: {
+              select: {
+                id: true,
+                username: true,
+                displayName: true,
+                avatarUrl: true,
+              },
+            },
+            files: {
+              orderBy: { order: 'asc' },
+              take: 1,
+            },
+            tags: true,
           },
-        },
-        files: {
-          orderBy: { order: 'asc' },
-          take: 1,
-        },
-        tags: true,
-      },
-    });
+        })
+      : [];
+
+    const rankedGists = gistIds.map((id: string) =>
+      gists.find((g: any) => g.id === id)
+    ).filter(Boolean);
 
     let nextCursor: string | null = null;
-    if (gists.length > pageSize) {
-      const nextItem = gists.pop();
-      nextCursor = nextItem!.id;
+    if (results.length > pageSize) {
+      nextCursor = results[pageSize].id;
     }
 
     return {
-      data: gists,
+      data: rankedGists,
       nextCursor,
       hasMore: !!nextCursor,
     };
+  }
+
+  private async getGistRank(gistId: string, query: string): Promise<number | null> {
+    const result = await this.prisma.$queryRawUnsafe<any>(
+      `
+      SELECT ts_rank("searchVector", plainto_tsquery('english', $2)) as rank
+      FROM "Gist"
+      WHERE id = $1
+      `,
+      gistId,
+      query
+    );
+
+    if (Array.isArray(result) && result.length > 0) {
+      return result[0].rank;
+    }
+    return null;
   }
 
   async getPopularTags() {
