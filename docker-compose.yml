@@ -56,7 +56,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: sh -c "npx prisma db push && npx prisma db seed && npm run start:dev"
+    command: sh -c "npx prisma db push && npx prisma db execute --file ./prisma/search-vector-setup.sql && npx prisma db seed && npm run start:dev"
 
   frontend:
     build:
