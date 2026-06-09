@@ -19,7 +19,7 @@ onMounted(() => {
 
 function handleSearch() {
   if (searchQuery.value.trim()) {
-    router.push({ name: 'search', query: { q: searchQuery.value.trim() } });
+    router.push({ name: 'home', query: { q: searchQuery.value.trim() } });
     searchQuery.value = '';
     mobileMenuOpen.value = false;
   }

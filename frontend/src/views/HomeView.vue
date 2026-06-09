@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed } from 'vue';
+import { ref, onMounted, onUnmounted, computed, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import GistCard from '@/components/GistCard.vue';
 import api from '@/utils/api';
 import { LANGUAGES } from '@/utils/constants';
@@ -32,6 +33,9 @@ interface Gist {
   }>;
 }
 
+const route = useRoute();
+const router = useRouter();
+
 const gists = ref<Gist[]>([]);
 const popularTags = ref<Array<{ name: string; count: number }>>([]);
 const nextCursor = ref<string | null>(null);
@@ -39,6 +43,9 @@ const hasMore = ref(false);
 const loading = ref(false);
 const initialLoading = ref(true);
 const selectedLanguage = ref<string | null>(null);
+
+const searchQuery = computed(() => (route.query.q as string) || '');
+const isSearchMode = computed(() => !!searchQuery.value.trim());
 
 let observer: IntersectionObserver | null = null;
 const loadMoreRef = ref<HTMLDivElement | null>(null);
@@ -49,7 +56,7 @@ const filteredLanguages = computed(() => {
 });
 
 async function fetchGists(append = false) {
-  if (loading.value || (!append && !initialLoading.value)) return;
+  if (loading.value) return;
 
   loading.value = true;
 
@@ -81,6 +88,42 @@ async function fetchGists(append = false) {
   }
 }
 
+async function searchGists(append = false) {
+  if (loading.value) return;
+
+  loading.value = true;
+
+  try {
+    const params: Record<string, any> = {
+      query: searchQuery.value.trim(),
+      limit: 20,
+    };
+    if (append && nextCursor.value) {
+      params.cursor = nextCursor.value;
+    }
+
+    const response = await api.get('/gists/search', { params });
+    const { data, nextCursor: cursor, hasMore: more } = response.data;
+
+    if (append) {
+      gists.value = [...gists.value, ...data];
+    } else {
+      gists.value = data;
+    }
+
+    nextCursor.value = cursor;
+    hasMore.value = more;
+  } catch (error) {
+    console.error('Failed to search gists:', error);
+    if (!append) {
+      gists.value = [];
+    }
+  } finally {
+    loading.value = false;
+    initialLoading.value = false;
+  }
+}
+
 async function fetchPopularTags() {
   try {
     const response = await api.get('/gists/tags/popular');
@@ -90,17 +133,34 @@ async function fetchPopularTags() {
   }
 }
 
-function handleLanguageChange(language: string) {
-  selectedLanguage.value = language === 'All' ? null : language;
+function resetListState() {
+  gists.value = [];
   nextCursor.value = null;
   hasMore.value = false;
-  fetchGists(false);
+}
+
+function handleLanguageChange(language: string) {
+  selectedLanguage.value = language === 'All' ? null : language;
+  resetListState();
+  if (isSearchMode.value) {
+    searchGists();
+  } else {
+    fetchGists();
+  }
 }
 
 function handleLoadMore() {
   if (hasMore.value && !loading.value) {
-    fetchGists(true);
+    if (isSearchMode.value) {
+      searchGists(true);
+    } else {
+      fetchGists(true);
+    }
   }
+}
+
+function handleClearSearch() {
+  router.push({ name: 'home' });
 }
 
 function setupIntersectionObserver() {
@@ -118,8 +178,22 @@ function setupIntersectionObserver() {
   }
 }
 
+watch(searchQuery, (newVal, oldVal) => {
+  if (newVal === oldVal) return;
+  resetListState();
+  if (newVal.trim()) {
+    searchGists();
+  } else {
+    fetchGists();
+  }
+});
+
 onMounted(() => {
-  fetchGists();
+  if (isSearchMode.value) {
+    searchGists();
+  } else {
+    fetchGists();
+  }
   fetchPopularTags();
   setupIntersectionObserver();
 });
@@ -169,8 +243,13 @@ onUnmounted(() => {
 
       <main class="main-feed">
         <div class="feed-header">
-          <h1>Latest Gists</h1>
-          <p v-if="selectedLanguage">Filtered by: {{ selectedLanguage }}</p>
+          <h1 v-if="isSearchMode">Search Results</h1>
+          <h1 v-else>Latest Gists</h1>
+          <p v-if="isSearchMode">
+            Results for: <strong>{{ searchQuery }}</strong>
+            <button class="btn-clear-search" @click="handleClearSearch">✕ Clear</button>
+          </p>
+          <p v-else-if="selectedLanguage">Filtered by: {{ selectedLanguage }}</p>
         </div>
 
         <div v-if="initialLoading" class="loading-state">
@@ -184,6 +263,11 @@ onUnmounted(() => {
               </div>
             </div>
           </div>
+        </div>
+
+        <div v-else-if="gists.length === 0 && isSearchMode" class="empty-state">
+          <p>No gists found for "{{ searchQuery }}"</p>
+          <p class="empty-hint">Try different keywords or check your spelling</p>
         </div>
 
         <div v-else-if="gists.length === 0" class="empty-state">
@@ -293,6 +377,28 @@ onUnmounted(() => {
 .feed-header p {
   color: var(--text-secondary);
   font-size: 0.875rem;
+}
+
+.btn-clear-search {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.8rem;
+  margin-left: 0.5rem;
+  padding: 0.125rem 0.375rem;
+  border-radius: var(--radius-sm);
+  transition: background-color 0.2s ease;
+}
+
+.btn-clear-search:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.empty-hint {
+  font-size: 0.875rem;
+  margin-top: 0.5rem;
 }
 
 .gist-list {

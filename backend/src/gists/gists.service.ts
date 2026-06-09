@@ -19,11 +19,6 @@ export class GistsService {
   private readonly POPULAR_GISTS_CACHE_KEY = 'popular_gists';
   private readonly CACHE_TTL = 5 * 60;
 
-  private buildSearchVector(title: string, description: string, files: { filename: string; content: string }[]): string {
-    const fileContent = files.map(f => `${f.filename} ${f.content}`).join(' ');
-    return `${title} ${description || ''} ${fileContent}`;
-  }
-
   private async updateGistStarsCount(gistId: string) {
     const count = await this.prisma.star.count({
       where: { gistId },
@@ -96,17 +91,93 @@ export class GistsService {
 
   async searchGists(searchDto: SearchGistsDto, currentUserId?: string) {
     const pageSize = searchDto.limit || 20;
+    const searchQuery = searchDto.query;
+
+    if (!searchQuery || !searchQuery.trim()) {
+      return { data: [], nextCursor: null, hasMore: false };
+    }
+
+    let cursorData: { rank: number; updatedAt: string; id: string } | null = null;
+    if (searchDto.cursor) {
+      try {
+        cursorData = JSON.parse(
+          Buffer.from(searchDto.cursor, 'base64').toString(),
+        );
+      } catch {}
+    }
+
+    const params: any[] = [searchQuery];
+    let paramIdx = 2;
+
+    const visibilityConditions = [`g.visibility = 'PUBLIC'`];
+    if (currentUserId) {
+      visibilityConditions.push(
+        `(g.visibility = 'UNLISTED' AND g."authorId" = $${paramIdx})`,
+      );
+      params.push(currentUserId);
+      paramIdx++;
+    }
+
+    let cursorCondition = '';
+    if (cursorData) {
+      const rankIdx = paramIdx;
+      const updatedAtIdx = paramIdx + 1;
+      const idIdx = paramIdx + 2;
+      paramIdx += 3;
+
+      cursorCondition = `AND (
+        sr.rank < $${rankIdx}
+        OR (sr.rank = $${rankIdx} AND sr."updatedAt" < $${updatedAtIdx})
+        OR (sr.rank = $${rankIdx} AND sr."updatedAt" = $${updatedAtIdx} AND sr.id < $${idIdx})
+      )`;
+      params.push(cursorData.rank, new Date(cursorData.updatedAt), cursorData.id);
+    }
+
+    params.push(pageSize + 1);
+    const limitIdx = paramIdx;
+
+    const sql = `
+      WITH search_results AS (
+        SELECT g.id, g."updatedAt",
+          ts_rank(g."searchVector", websearch_to_tsquery('english', $1)) AS rank
+        FROM "Gist" g
+        WHERE g."searchVector" @@ websearch_to_tsquery('english', $1)
+          AND (${visibilityConditions.join(' OR ')})
+      )
+      SELECT sr.id, sr.rank, sr."updatedAt" FROM search_results sr
+      WHERE 1=1 ${cursorCondition}
+      ORDER BY sr.rank DESC, sr."updatedAt" DESC, sr.id DESC
+      LIMIT $${limitIdx}
+    `;
+
+    const results = await this.prisma.$queryRawUnsafe<
+      Array<{ id: string; rank: number; updatedAt: Date }>
+    >(sql, ...params);
+
+    let nextCursor: string | null = null;
+    let hasMore = false;
+
+    if (results.length > pageSize) {
+      hasMore = true;
+      results.pop();
+      const lastItem = results[results.length - 1];
+      nextCursor = Buffer.from(
+        JSON.stringify({
+          rank: lastItem.rank,
+          updatedAt: lastItem.updatedAt.toISOString(),
+          id: lastItem.id,
+        }),
+      ).toString('base64');
+    }
+
+    if (results.length === 0) {
+      return { data: [], nextCursor: null, hasMore: false };
+    }
+
+    const gistIds = results.map(r => r.id);
 
     const gists = await this.prisma.gist.findMany({
-      where: {
-        AND: [
-          { visibility: Visibility.PUBLIC },
-        ],
-      } as any,
-      orderBy: [{ updatedAt: 'desc' }],
-      take: pageSize + 1,
-      cursor: searchDto.cursor ? { id: searchDto.cursor } : undefined,
-      skip: searchDto.cursor ? 1 : 0,
+      where: { id: { in: gistIds } },
       include: {
         author: {
           select: {
@@ -124,17 +195,15 @@ export class GistsService {
       },
     });
 
-    let nextCursor: string | null = null;
-    if (gists.length > pageSize) {
-      const nextItem = gists.pop();
-      nextCursor = nextItem!.id;
-    }
+    const rankMap = new Map(results.map(r => [r.id, r.rank]));
+    gists.sort((a, b) => {
+      const rankA = rankMap.get(a.id)!;
+      const rankB = rankMap.get(b.id)!;
+      if (rankB !== rankA) return rankB - rankA;
+      return b.updatedAt.getTime() - a.updatedAt.getTime();
+    });
 
-    return {
-      data: gists,
-      nextCursor,
-      hasMore: !!nextCursor,
-    };
+    return { data: gists, nextCursor, hasMore };
   }
 
   async getPopularTags() {

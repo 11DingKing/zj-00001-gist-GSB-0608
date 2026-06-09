@@ -307,8 +307,6 @@ async function main() {
     });
 
     if (!existingGist) {
-      const searchVector = `${data.title} ${data.description || ''} ${data.files.map((f) => f.content).join(' ')}`;
-
       await prisma.$transaction(async (tx) => {
         const gist = await tx.gist.create({
           data: {
